@@ -5,7 +5,6 @@ import 'home_screen.dart';
 import 'fitness_tracker_screen.dart';
 import 'progress_screen.dart';
 import 'profile_screen.dart';
-import 'notifications_screen.dart';
 
 class MainShell extends StatefulWidget {
   const MainShell({super.key});

@@ -49,19 +49,19 @@ class SplashScreen extends StatelessWidget {
               ),
               const SizedBox(height: 40),
               // Feature list
-              _FeatureItem(
+              const _FeatureItem(
                 icon: Icons.track_changes_rounded,
                 color: AppTheme.green,
                 label: 'Track Fitness',
               ),
               const SizedBox(height: 12),
-              _FeatureItem(
+              const _FeatureItem(
                 icon: Icons.mood_rounded,
                 color: AppTheme.primary,
                 label: 'Monitor Mood',
               ),
               const SizedBox(height: 12),
-              _FeatureItem(
+              const _FeatureItem(
                 icon: Icons.restaurant_menu_rounded,
                 color: AppTheme.primary,
                 label: 'Manage Diet',

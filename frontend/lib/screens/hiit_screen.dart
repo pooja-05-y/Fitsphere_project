@@ -206,7 +206,7 @@ class _HiitScreenState extends State<HiitScreen>
               style: GoogleFonts.poppins(color: Colors.white54, fontSize: 13)),
           const SizedBox(height: 16),
           Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-            _StatPill(label: 'Rounds', value: '$_rounds', color: AppTheme.orange),
+            const _StatPill(label: 'Rounds', value: '$_rounds', color: AppTheme.orange),
             _StatPill(label: 'Calories', value: '~$_totalCalories', color: AppTheme.accent),
             _StatPill(label: 'Exercises', value: '$_completedExercises', color: AppTheme.green),
           ]),
@@ -298,7 +298,7 @@ class _HiitScreenState extends State<HiitScreen>
               child: LinearProgressIndicator(
                 value: _doneCount / _totalExercisesCount,
                 backgroundColor: AppTheme.darkCardLight,
-                valueColor: AlwaysStoppedAnimation(AppTheme.orange),
+                valueColor: const AlwaysStoppedAnimation(AppTheme.orange),
                 minHeight: 6,
               ),
             ),

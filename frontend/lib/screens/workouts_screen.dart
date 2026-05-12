@@ -170,7 +170,7 @@ class WorkoutsScreen extends StatelessWidget {
             margin: const EdgeInsets.all(20),
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              gradient: LinearGradient(
+              gradient: const LinearGradient(
                 colors: [AppTheme.primary, AppTheme.primaryDark],
               ),
               borderRadius: BorderRadius.circular(16),
@@ -187,7 +187,7 @@ class WorkoutsScreen extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 10),
-                Row(
+                const Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
                     _WeekStat(value: '12', label: 'Workouts'),

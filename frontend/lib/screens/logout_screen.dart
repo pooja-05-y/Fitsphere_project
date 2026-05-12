@@ -68,7 +68,7 @@ class _LogoutSheet extends StatelessWidget {
                   onPressed: () => Navigator.pop(context),
                   style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 14),
-                    side: BorderSide(color: AppTheme.lightBorder),
+                    side: const BorderSide(color: AppTheme.lightBorder),
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(14)),
                   ),
