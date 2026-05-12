@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "658905280765",
+    "project_id": "fitsphere-project",
+    "storage_bucket": "fitsphere-project.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:658905280765:android:da6400bf151bf3f1870e94",
+        "android_client_info": {
+          "package_name": "com.example.fit_sphere"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "658905280765-4plvsg40b0cp197ikf56ktqomhk2o9jd.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAAiOhDJ5TLCybpSC-cEkxL_kFi0HHJNuQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "658905280765-4plvsg40b0cp197ikf56ktqomhk2o9jd.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "658905280765-eg3t190goj0mclt8a3pip3ahhgcog05h.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.fitSphere"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
