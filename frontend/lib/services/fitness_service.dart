@@ -1,112 +1,113 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:pedometer/pedometer.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:intl/intl.dart';
-import 'notification_service.dart';
 
 class FitnessService extends ChangeNotifier {
-  // Singleton so every screen shares the same live data
   static final FitnessService _instance = FitnessService._internal();
   factory FitnessService() => _instance;
   FitnessService._internal();
 
-  // ── Step tracking ──────────────────────────────────────────────────────────
+  // ── Step state ─────────────────────────────────────────────────────────────
   int _todaySteps = 0;
   int _stepGoal = 10000;
-  int _baseStepCount = -1; // raw pedometer value at midnight / first launch
-  String _pedometerStatus = 'unknown';
-  bool _pedometerAvailable = true;
+  int _rawBase = -1;
+  bool _pedometerWorking = false;
+  String _status = 'Initialising...';
 
-  StreamSubscription<StepCount>? _stepSub;
-  StreamSubscription<PedestrianStatus>? _statusSub;
+  // ── Hourly / weekly ────────────────────────────────────────────────────────
+  List<int> _hourly = List.filled(24, 0);
+  int _stepsAtHourStart = 0;
+  int _lastHour = -1;
+  List<int> _weekly = [3200, 7800, 5500, 9100, 6300, 8400, 0];
 
-  // ── Hourly bucket (index = hour 0-23) ─────────────────────────────────────
-  List<int> _hourlySteps = List.filled(24, 0);
-  int _stepsAtStartOfHour = 0;
-  int _lastTrackedHour = -1;
+  // ── Accel fallback step detection ─────────────────────────────────────────
+  bool _usingFallback = false;
+  int _accelSteps = 0;
+  double _prevMag = 9.8;
+  bool _stepPending = false;
+  DateTime _lastStepTime = DateTime.now();
+  static const double _threshold = 11.5;   // tune for Samsung
+  static const int _minMs = 300;
 
-  // ── Weekly history ─────────────────────────────────────────────────────────
-  List<int> _weeklySteps = [3200, 7800, 5500, 9100, 6300, 8400, 0];
-
-  // ── User metrics ───────────────────────────────────────────────────────────
-  double _weightKg = 70;
-  double _heightCm = 175;
+  // ── Heart rate ─────────────────────────────────────────────────────────────
+  double _heartRate = 72;
+  final List<double> _hrBuf = [];
 
   // ── Active minutes ─────────────────────────────────────────────────────────
   int _activeMinutes = 0;
-  bool _isCurrentlyWalking = false;
+  bool _moving = false;
   Timer? _activeTimer;
 
-  // ── Heart rate estimate via accelerometer ──────────────────────────────────
-  double _heartRate = 72;
-  final List<double> _accelMagnitudes = [];
+  // ── User metrics ────────────────────────────────────────────────────────────
+  double _weight = 70;
+  double _height = 175;
+
+  // ── Streams ────────────────────────────────────────────────────────────────
+  StreamSubscription<StepCount>? _stepSub;
+  StreamSubscription<PedestrianStatus>? _pedStatusSub;
   StreamSubscription<AccelerometerEvent>? _accelSub;
 
-  // ── Calories consumed (set by diet tracker) ────────────────────────────────
-  double _caloriesConsumed = 1500;
-
-  // ── Notification milestones already fired today ───────────────────────────
-  final Set<int> _firedMilestones = {};
-
   // ── Getters ────────────────────────────────────────────────────────────────
-  int get todaySteps => _todaySteps;
-  int get stepGoal => _stepGoal;
-  double get stepProgress => (_todaySteps / _stepGoal).clamp(0.0, 1.0);
-  String get pedometerStatus => _pedometerStatus;
-  bool get pedometerAvailable => _pedometerAvailable;
+  int    get todaySteps      => _todaySteps;
+  int    get stepGoal        => _stepGoal;
+  double get stepProgress    => (_todaySteps / _stepGoal).clamp(0.0, 1.0);
+  String get pedometerStatus => _status;
+  bool   get pedometerAvailable => _pedometerWorking || _usingFallback;
 
-  double get caloriesBurned {
-    // Standard formula: steps × 0.04 × (weight / 70)
-    return (_todaySteps * 0.04 * (_weightKg / 70));
-  }
+  double get caloriesBurned  => _todaySteps * 0.04 * (_weight / 70);
+  double get distanceKm      => _todaySteps * 0.415 * (_height / 100) / 1000;
+  double get heartRate       => _heartRate;
+  int    get activeMinutes   => _activeMinutes;
+  double get weightKg        => _weight;
+  double get heightCm        => _height;
 
-  double get distanceKm {
-    // Stride = 0.415 × height(m)
-    final stride = 0.415 * (_heightCm / 100);
-    return _todaySteps * stride / 1000;
-  }
+  List<int> get hourlySteps  => List.unmodifiable(_hourly);
+  List<int> get weeklySteps  => List.unmodifiable(_weekly);
 
-  double get heartRate => _heartRate;
-  int get activeMinutes => _activeMinutes;
-  double get caloriesConsumed => _caloriesConsumed;
-  double get caloriesGoal => 2000;
-  List<int> get hourlySteps => List.unmodifiable(_hourlySteps);
-  List<int> get weeklySteps => List.unmodifiable(_weeklySteps);
-  double get weightKg => _weightKg;
-  double get heightCm => _heightCm;
-
-  // ── Initialise everything ──────────────────────────────────────────────────
+  // ── Init ───────────────────────────────────────────────────────────────────
   Future<void> init() async {
-    await _loadFromPrefs();
+    await _load();
     _startPedometer();
     _startAccelerometer();
-    _startActiveMinuteTimer();
+    _startActiveTimer();
+    // If pedometer gives no reading in 6 seconds, activate fallback
+    Future.delayed(const Duration(seconds: 6), () {
+      if (!_pedometerWorking) {
+        _usingFallback = true;
+        _status = 'Motion sensor active';
+        notifyListeners();
+      }
+    });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // PEDOMETER
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Pedometer ──────────────────────────────────────────────────────────────
   void _startPedometer() {
     _stepSub?.cancel();
-    _statusSub?.cancel();
+    _pedStatusSub?.cancel();
 
     _stepSub = Pedometer.stepCountStream.listen(
-      _onStepCount,
+      (event) {
+        _pedometerWorking = true;
+        _usingFallback = false;
+        _handleRawSteps(event.steps);
+      },
       onError: (e) {
-        _pedometerAvailable = false;
-        _pedometerStatus = 'unavailable';
+        debugPrint('[FitSphere] Pedometer error: $e');
+        _usingFallback = true;
+        _status = 'Motion sensor active';
         notifyListeners();
       },
       cancelOnError: false,
     );
 
-    _statusSub = Pedometer.pedestrianStatusStream.listen(
+    _pedStatusSub = Pedometer.pedestrianStatusStream.listen(
       (event) {
-        _pedometerStatus = event.status;
-        _isCurrentlyWalking = event.status == 'walking';
+        _moving = event.status == 'walking';
+        _status = _moving ? 'Walking' : 'Still';
         notifyListeners();
       },
       onError: (_) {},
@@ -114,136 +115,120 @@ class FitnessService extends ChangeNotifier {
     );
   }
 
-  void _onStepCount(StepCount event) async {
-    final now = DateTime.now();
-    final todayStr = DateFormat('yyyy-MM-dd').format(now);
+  Future<void> _handleRawSteps(int raw) async {
     final prefs = await SharedPreferences.getInstance();
-    final savedDate = prefs.getString('step_date') ?? '';
+    final today = _todayStr();
+    final saved = prefs.getString('step_date') ?? '';
 
-    // First ever reading — set base
-    if (_baseStepCount == -1) {
-      _baseStepCount = event.steps;
-      await prefs.setInt('step_base', _baseStepCount);
-      await prefs.setString('step_date', todayStr);
+    if (_rawBase == -1) {
+      _rawBase = raw;
+      await prefs.setInt('step_base', raw);
+      await prefs.setString('step_date', today);
     }
 
-    // New day rolled over
-    if (savedDate != todayStr && savedDate.isNotEmpty) {
-      // Save yesterday total into weekly history
-      _shiftWeeklyHistory(_todaySteps);
-      _hourlySteps = List.filled(24, 0);
+    if (saved != today && saved.isNotEmpty) {
+      _shiftWeekly(_todaySteps);
+      _hourly = List.filled(24, 0);
       _activeMinutes = 0;
-      _firedMilestones.clear();
-      _baseStepCount = event.steps;
-      await prefs.setInt('step_base', _baseStepCount);
-      await prefs.setString('step_date', todayStr);
+      _rawBase = raw;
+      await prefs.setInt('step_base', raw);
+      await prefs.setString('step_date', today);
     }
 
-    // Calculate today's steps
-    _todaySteps = (event.steps - _baseStepCount).clamp(0, 9999999);
-
-    // Update hourly bucket
-    _updateHourlyBucket(now.hour);
-
-    // Check milestone notifications
-    _checkStepMilestones();
-
-    // Persist
-    await prefs.setInt('today_steps', _todaySteps);
-    await _saveWeeklyHistory();
-
+    _todaySteps = (raw - _rawBase).clamp(0, 9999999);
+    _weekly[6] = _todaySteps;
+    _updateHourly();
+    await _saveSteps(prefs);
     notifyListeners();
   }
 
-  void _updateHourlyBucket(int currentHour) {
-    if (_lastTrackedHour != currentHour) {
-      // Hour changed — record how many steps we had at this boundary
-      _stepsAtStartOfHour = _todaySteps;
-      _lastTrackedHour = currentHour;
-    }
-    // Steps taken in this hour = total today minus what we had at the hour start
-    final stepsThisHour = (_todaySteps - _stepsAtStartOfHour).clamp(0, 99999);
-    _hourlySteps[currentHour] = stepsThisHour;
-  }
-
-  void _checkStepMilestones() {
-    final milestones = [2000, 5000, 7500, 10000, 15000, 20000];
-    for (final m in milestones) {
-      if (_todaySteps >= m && !_firedMilestones.contains(m)) {
-        _firedMilestones.add(m);
-        if (m == _stepGoal) {
-          NotificationService().showNotification(
-            id: m,
-            title: '🎉 Goal Reached!',
-            body: 'Amazing! You hit your ${_formatNumber(m)} step goal today!',
-          );
-        } else {
-          NotificationService().showNotification(
-            id: m,
-            title: '🚶 ${_formatNumber(m)} Steps!',
-            body: 'Great progress! Keep going — you\'re crushing it!',
-          );
-        }
-      }
-    }
-  }
-
-  String _formatNumber(int n) =>
-      n >= 1000 ? '${(n / 1000).toStringAsFixed(n % 1000 == 0 ? 0 : 1)}k' : '$n';
-
-  void _shiftWeeklyHistory(int todayTotal) {
-    for (int i = 0; i < 6; i++) {
-      _weeklySteps[i] = _weeklySteps[i + 1];
-    }
-    _weeklySteps[6] = todayTotal;
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // ACCELEROMETER → Heart Rate estimate
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Accelerometer ──────────────────────────────────────────────────────────
   void _startAccelerometer() {
     _accelSub?.cancel();
     _accelSub = accelerometerEventStream(
-      samplingPeriod: const Duration(milliseconds: 100),
-    ).listen((event) {
-      final mag = sqrt(event.x * event.x + event.y * event.y + event.z * event.z);
-      _accelMagnitudes.add(mag);
-      if (_accelMagnitudes.length > 100) _accelMagnitudes.removeAt(0);
-      if (_accelMagnitudes.length == 100) _estimateHeartRate();
+      samplingPeriod: const Duration(milliseconds: 50),
+    ).listen((e) {
+      final mag = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
+
+      // Heart rate buffer
+      _hrBuf.add(mag);
+      if (_hrBuf.length > 150) _hrBuf.removeAt(0);
+      if (_hrBuf.length == 150) _calcHR();
+
+      // Fallback step detection
+      if (_usingFallback) _detectStep(mag);
+
+      _prevMag = mag;
     });
   }
 
-  void _estimateHeartRate() {
-    final mean = _accelMagnitudes.reduce((a, b) => a + b) / _accelMagnitudes.length;
-    int crossings = 0;
-    for (int i = 1; i < _accelMagnitudes.length; i++) {
-      if ((_accelMagnitudes[i - 1] - mean).sign != (_accelMagnitudes[i] - mean).sign) {
-        crossings++;
+  void _detectStep(double mag) {
+    // Rising edge detection — Samsung gyration signature
+    if (!_stepPending && mag > _threshold && _prevMag <= _threshold) {
+      _stepPending = true;
+    } else if (_stepPending && mag < _threshold) {
+      // Falling edge — confirmed step
+      final now = DateTime.now();
+      final ms = now.difference(_lastStepTime).inMilliseconds;
+      if (ms >= _minMs) {
+        _accelSteps++;
+        _todaySteps = _accelSteps;
+        _weekly[6] = _todaySteps;
+        _moving = true;
+        _status = 'Walking';
+        _lastStepTime = now;
+        _updateHourly();
+        notifyListeners();
+        // Save every 10 steps
+        if (_accelSteps % 10 == 0) {
+          SharedPreferences.getInstance().then(
+            (prefs) => _saveSteps(prefs));
+        }
       }
+      _stepPending = false;
     }
-    // 100 samples at 10Hz = 10 seconds; crossings / 10 * 60 = BPM estimate
-    final raw = ((crossings / 10.0) * 60).clamp(45.0, 180.0);
-    // EMA smoothing
+  }
+
+  void _calcHR() {
+    final mean = _hrBuf.reduce((a, b) => a + b) / _hrBuf.length;
+    int cross = 0;
+    for (int i = 1; i < _hrBuf.length; i++) {
+      if ((_hrBuf[i - 1] - mean).sign != (_hrBuf[i] - mean).sign) cross++;
+    }
+    // 150 samples @ 20Hz = 7.5s
+    final raw = ((cross / 7.5) * 60).clamp(45.0, 180.0);
     _heartRate = _heartRate * 0.85 + raw * 0.15;
     notifyListeners();
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // ACTIVE MINUTES
-  // ─────────────────────────────────────────────────────────────────────────
-  void _startActiveMinuteTimer() {
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+  void _updateHourly() {
+    final h = DateTime.now().hour;
+    if (h != _lastHour) {
+      _stepsAtHourStart = _todaySteps;
+      _lastHour = h;
+    }
+    _hourly[h] = (_todaySteps - _stepsAtHourStart).clamp(0, 99999);
+  }
+
+  void _shiftWeekly(int todayTotal) {
+    for (int i = 0; i < 6; i++) {
+      _weekly[i] = _weekly[i + 1];
+    }
+    _weekly[6] = todayTotal;
+  }
+
+  String _todayStr() {
+    final n = DateTime.now();
+    return '${n.year}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')}';
+  }
+
+  // ── Active timer ──────────────────────────────────────────────────────────
+  void _startActiveTimer() {
     _activeTimer?.cancel();
     _activeTimer = Timer.periodic(const Duration(minutes: 1), (_) async {
-      if (_isCurrentlyWalking) {
+      if (_moving) {
         _activeMinutes++;
-        // Notification every 30 active minutes
-        if (_activeMinutes % 30 == 0) {
-          NotificationService().showNotification(
-            id: 9000 + _activeMinutes,
-            title: '💪 $_activeMinutes Active Minutes!',
-            body: 'Fantastic effort — keep moving!',
-          );
-        }
         final prefs = await SharedPreferences.getInstance();
         await prefs.setInt('active_minutes', _activeMinutes);
         notifyListeners();
@@ -251,43 +236,40 @@ class FitnessService extends ChangeNotifier {
     });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // PERSISTENCE
-  // ─────────────────────────────────────────────────────────────────────────
-  Future<void> _loadFromPrefs() async {
+  // ── Persistence ────────────────────────────────────────────────────────────
+  Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
-    final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
-    final savedDate = prefs.getString('step_date') ?? '';
+    final today = _todayStr();
+    final saved = prefs.getString('step_date') ?? '';
 
-    if (savedDate == todayStr) {
-      _baseStepCount = prefs.getInt('step_base') ?? -1;
+    if (saved == today) {
+      _rawBase = prefs.getInt('step_base') ?? -1;
       _todaySteps = prefs.getInt('today_steps') ?? 0;
       _activeMinutes = prefs.getInt('active_minutes') ?? 0;
+      _accelSteps = _todaySteps;
     }
 
     _stepGoal = prefs.getInt('step_goal') ?? 10000;
-    _weightKg = prefs.getDouble('weight_kg') ?? 70;
-    _heightCm = prefs.getDouble('height_cm') ?? 175;
+    _weight   = prefs.getDouble('weight_kg') ?? 70;
+    _height   = prefs.getDouble('height_cm') ?? 175;
 
-    final weekStr = prefs.getString('weekly_steps') ?? '';
-    if (weekStr.isNotEmpty) {
-      final parts = weekStr.split(',');
+    final ws = prefs.getString('weekly_steps') ?? '';
+    if (ws.isNotEmpty) {
+      final parts = ws.split(',');
       if (parts.length == 7) {
-        _weeklySteps = parts.map((e) => int.tryParse(e) ?? 0).toList();
+        _weekly = parts.map((e) => int.tryParse(e) ?? 0).toList();
       }
     }
-    // Inject today into the last slot of weekly
-    _weeklySteps[6] = _todaySteps;
+    _weekly[6] = _todaySteps;
   }
 
-  Future<void> _saveWeeklyHistory() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('weekly_steps', _weeklySteps.join(','));
+  Future<void> _saveSteps(SharedPreferences prefs) async {
+    await prefs.setInt('today_steps', _todaySteps);
+    await prefs.setString('weekly_steps', _weekly.join(','));
+    await prefs.setString('step_date', _todayStr());
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // PUBLIC SETTERS (called from UI)
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Public setters ─────────────────────────────────────────────────────────
   Future<void> setStepGoal(int goal) async {
     _stepGoal = goal;
     final prefs = await SharedPreferences.getInstance();
@@ -296,23 +278,18 @@ class FitnessService extends ChangeNotifier {
   }
 
   Future<void> setUserMetrics({double? weight, double? height}) async {
-    if (weight != null) _weightKg = weight;
-    if (height != null) _heightCm = height;
+    if (weight != null) _weight = weight;
+    if (height != null) _height = height;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('weight_kg', _weightKg);
-    await prefs.setDouble('height_cm', _heightCm);
-    notifyListeners();
-  }
-
-  void updateCaloriesConsumed(double cal) {
-    _caloriesConsumed = cal;
+    await prefs.setDouble('weight_kg', _weight);
+    await prefs.setDouble('height_cm', _height);
     notifyListeners();
   }
 
   @override
   void dispose() {
     _stepSub?.cancel();
-    _statusSub?.cancel();
+    _pedStatusSub?.cancel();
     _accelSub?.cancel();
     _activeTimer?.cancel();
     super.dispose();
